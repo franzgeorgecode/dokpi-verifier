@@ -1,0 +1,284 @@
+name: DOKPI Autopilot Verification
+
+on:
+  schedule:
+    - cron: '23 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dokpi-autopilot-verification
+  cancel-in-progress: false
+
+jobs:
+  queue:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      has_target: ${{ steps.queue.outputs.has_target }}
+      candidate_id: ${{ steps.queue.outputs.candidate_id }}
+      repository_url: ${{ steps.queue.outputs.repository_url }}
+      profile: ${{ steps.queue.outputs.profile }}
+
+    steps:
+      - name: Fetch Provider-Guarded public queue
+        id: queue
+        shell: bash
+        env:
+          DOKPI_QUEUE_URL: 'https://dokpi-verification-bridge-dev.franzgeorgecode.workers.dev/v1/queue'
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error --max-time 20 \
+            "$DOKPI_QUEUE_URL" \
+            -o /tmp/queue.json
+
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          data = json.loads(
+              Path("/tmp/queue.json").read_text()
+          )
+
+          target = data.get("target")
+          output = Path(os.environ["GITHUB_OUTPUT"])
+
+          if target is None:
+              with output.open("a") as handle:
+                  handle.write("has_target=false\n")
+              raise SystemExit(0)
+
+          expected_repo = (
+              "https://github.com/RARgames/4gaBoards"
+          )
+          expected_profile = "4gaboards-compose-v1"
+
+          candidate_id = target.get("candidate_id", "")
+          repository_url = target.get("repository_url", "")
+          profile = target.get("profile", "")
+
+          if (
+              not isinstance(candidate_id, str)
+              or not candidate_id.startswith(
+                  "candidate.awesome-selfhosted."
+              )
+              or repository_url != expected_repo
+              or profile != expected_profile
+          ):
+              raise SystemExit("unsafe_queue_target")
+
+          with output.open("a") as handle:
+              handle.write("has_target=true\n")
+              handle.write(
+                  f"candidate_id={candidate_id}\n"
+              )
+              handle.write(
+                  f"repository_url={repository_url}\n"
+              )
+              handle.write(f"profile={profile}\n")
+          PY
+
+  verify:
+    needs: queue
+    if: needs.queue.outputs.has_target == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    outputs:
+      result_b64: ${{ steps.result.outputs.result_b64 }}
+
+    env:
+      DOKPI_CANDIDATE_ID: ${{ needs.queue.outputs.candidate_id }}
+      DOKPI_REPOSITORY_URL: ${{ needs.queue.outputs.repository_url }}
+      DOKPI_PROFILE: ${{ needs.queue.outputs.profile }}
+      DOKPI_RESULT_PATH: /tmp/dokpi-autopilot-result.json
+
+    steps:
+      - name: Clone public verifier without credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -c credential.helper= clone --depth 1 \
+            https://github.com/franzgeorgecode/dokpi-verifier \
+            verifier
+
+      - name: Execute isolated operational verifier
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 verifier/scripts/autopilot_verify.py
+
+      - name: Validate and export sanitized result
+        id: result
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          path = Path("/tmp/dokpi-autopilot-result.json")
+          data = json.loads(path.read_text())
+
+          required = {
+              "schema_version",
+              "candidate_id",
+              "repository_url",
+              "profile",
+              "source_commit_sha",
+              "github_run_id",
+              "github_run_url",
+              "observed_at",
+              "dimensions",
+          }
+
+          if set(data) != required:
+              raise SystemExit("unexpected_result_keys")
+
+          if data["schema_version"] != 1:
+              raise SystemExit("bad_schema")
+
+          raw = json.dumps(
+              data,
+              sort_keys=True,
+              separators=(",", ":"),
+          ).encode()
+
+          import base64
+          encoded = base64.b64encode(raw).decode()
+
+          if len(encoded) > 60000:
+              raise SystemExit("result_too_large")
+
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a") as handle:
+              handle.write(f"result_b64={encoded}\n")
+          PY
+
+  publish:
+    needs: [queue, verify]
+    if: needs.queue.outputs.has_target == 'true' && always() && needs.verify.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RESULT_B64: ${{ needs.verify.outputs.result_b64 }}
+
+    steps:
+      - name: Clone clean verifier publishing workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh repo clone franzgeorgecode/dokpi-verifier publish
+          cd publish
+          git config user.name "DOKPI Autopilot"
+          git config user.email "franzgeorgecode@gmail.com"
+
+      - name: Sanitize and write public result
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd publish
+
+          python3 - <<'PY'
+          import base64
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          raw = base64.b64decode(
+              os.environ["RESULT_B64"],
+              validate=True,
+          )
+
+          if len(raw) > 64000:
+              raise SystemExit("result_too_large")
+
+          data = json.loads(raw)
+
+          if (
+              data.get("schema_version") != 1
+              or data.get("repository_url")
+                  != "https://github.com/RARgames/4gaBoards"
+              or data.get("profile")
+                  != "4gaboards-compose-v1"
+              or not re.fullmatch(
+                  r"[0-9a-f]{40}",
+                  data.get("source_commit_sha", ""),
+              )
+              or not re.fullmatch(
+                  r"[0-9]+",
+                  data.get("github_run_id", ""),
+              )
+          ):
+              raise SystemExit("invalid_result")
+
+          dimensions = data.get("dimensions")
+          expected = {
+              "install_start",
+              "persistence",
+              "backup_restore",
+              "security",
+              "upgrade",
+          }
+
+          if set(dimensions or {}) != expected:
+              raise SystemExit("invalid_dimensions")
+
+          for value in dimensions.values():
+              if value.get("status") not in {
+                  "passed", "failed", "unknown"
+              }:
+                  raise SystemExit("invalid_status")
+              if (
+                  not isinstance(value.get("summary"), str)
+                  or len(value["summary"]) > 500
+              ):
+                  raise SystemExit("invalid_summary")
+
+          destination = Path(
+              "results/autopilot/4gaboards"
+          )
+          destination.mkdir(
+              parents=True,
+              exist_ok=True,
+          )
+
+          serialized = json.dumps(
+              data,
+              sort_keys=True,
+              indent=2,
+          ) + "\n"
+
+          (destination / (
+              data["github_run_id"] + ".json"
+          )).write_text(serialized)
+
+          (destination / "latest.json").write_text(
+              serialized
+          )
+          PY
+
+      - name: Commit sanitized evidence only
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd publish
+          git add results/autopilot/4gaboards
+
+          if git diff --cached --quiet; then
+            echo "No result change to publish."
+            exit 0
+          fi
+
+          git commit -m "evidence: publish DOKPI Autopilot run ${GITHUB_RUN_ID}"
+          git push origin HEAD:main

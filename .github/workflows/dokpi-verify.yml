@@ -1,0 +1,173 @@
+name: DOKPI External Verification
+
+on:
+  workflow_dispatch:
+    inputs:
+      candidate_id:
+        description: DOKPI candidate id
+        required: true
+        type: string
+      repo_url:
+        description: Public GitHub repository URL
+        required: true
+        type: string
+      container_path:
+        description: Dockerfile or Compose path
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    env:
+      TARGET_REPO: ${{ inputs.repo_url }}
+      CANDIDATE_ID: ${{ inputs.candidate_id }}
+      CONTAINER_PATH: ${{ inputs.container_path }}
+
+    steps:
+      - name: Validate bounded inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$TARGET_REPO" =~ ^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/?$ ]]; then
+            echo "unsafe_repository_url"
+            exit 2
+          fi
+
+          if [[ "$CONTAINER_PATH" == /* || "$CONTAINER_PATH" == *".."* || "$CONTAINER_PATH" == *":"* ]]; then
+            echo "unsafe_container_path"
+            exit 2
+          fi
+
+          base="$(basename "$CONTAINER_PATH" | tr '[:upper:]' '[:lower:]')"
+
+          if [[ "$base" != "dockerfile" && ! "$base" =~ ^(docker-)?compose.*\.ya?ml$ ]]; then
+            echo "unsupported_container_path"
+            exit 2
+          fi
+
+      - name: Clone candidate without credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -c credential.helper= clone --depth 1 "$TARGET_REPO" candidate
+          cd candidate
+          git rev-parse HEAD
+          git remote -v
+
+      - name: Run real Docker verification
+        id: docker
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd candidate
+
+          if [[ ! -f "$CONTAINER_PATH" ]]; then
+            echo "container_path_missing"
+            exit 3
+          fi
+
+          base="$(basename "$CONTAINER_PATH" | tr '[:upper:]' '[:lower:]')"
+
+          if [[ "$base" == "dockerfile" ]]; then
+            echo "DOKPI method: docker_build"
+            set +e
+            timeout 12m docker build \
+              --progress=plain \
+              --file "$CONTAINER_PATH" \
+              --tag "dokpi-verification:${GITHUB_RUN_ID}" \
+              .
+            rc=$?
+            set -e
+
+            if [[ "$rc" -ne 0 ]]; then
+              echo "docker_build_failed_or_timed_out:$rc"
+              exit "$rc"
+            fi
+
+            docker image inspect \
+              "dokpi-verification:${GITHUB_RUN_ID}" \
+              --format '{{.Id}} {{.Architecture}} {{.Os}}'
+
+            exit 0
+          fi
+
+          echo "DOKPI method: docker_compose_config"
+
+          docker compose \
+            -f "$CONTAINER_PATH" \
+            config --quiet
+
+          docker compose \
+            -f "$CONTAINER_PATH" \
+            config --format json \
+            > /tmp/dokpi-compose.json
+
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+
+          data = json.loads(
+              Path("/tmp/dokpi-compose.json").read_text()
+          )
+
+          services = data.get("services", {})
+          if not services:
+              raise SystemExit("compose_has_no_services")
+
+          dangerous = []
+
+          for name, service in services.items():
+              if service.get("privileged") is True:
+                  dangerous.append(f"{name}:privileged")
+
+              if service.get("network_mode") == "host":
+                  dangerous.append(f"{name}:network_mode_host")
+
+              if service.get("pid") == "host":
+                  dangerous.append(f"{name}:pid_host")
+
+              caps = [
+                  str(value).upper()
+                  for value in service.get("cap_add", [])
+              ]
+
+              if "ALL" in caps or "SYS_ADMIN" in caps:
+                  dangerous.append(f"{name}:dangerous_cap_add")
+
+              for volume in service.get("volumes", []):
+                  source = volume.get("source") if isinstance(volume, dict) else None
+                  if source in ("/", "/var/run/docker.sock"):
+                      dangerous.append(f"{name}:dangerous_host_mount")
+
+          if dangerous:
+              raise SystemExit(
+                  "unsafe_compose:" + ",".join(dangerous)
+              )
+
+          print(
+              f"compose_services={len(services)}; "
+              "dangerous_settings=0"
+          )
+          PY
+
+      - name: Verification summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## DOKPI external verification"
+            echo ""
+            echo "- Candidate: \`$CANDIDATE_ID\`"
+            echo "- Repository: \`$TARGET_REPO\`"
+            echo "- Container path: \`$CONTAINER_PATH\`"
+            echo "- Runner: \`ubuntu-latest\`"
+            echo "- Candidate secrets: **none**"
+            echo "- Run: \`$GITHUB_RUN_ID\`"
+          } >> "$GITHUB_STEP_SUMMARY"

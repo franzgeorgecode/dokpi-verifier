@@ -22,11 +22,11 @@
       "summary": "version-to-version upgrade profile not yet proven"
     }
   },
-  "github_run_id": "38141695295",
-  "github_run_url": "https://github.com/franzgeorgecode/dokpi-verifier/actions/runs/38141695295",
-  "observed_at": "2026-10-11T13:04:10Z",
+  "github_run_id": "38412729497",
+  "github_run_url": "https://github.com/franzgeorgecode/dokpi-verifier/actions/runs/38412729497",
+  "observed_at": "2026-10-13T14:22:18Z",
   "profile": "4gaboards-compose-v1",
   "repository_url": "https://github.com/RARgames/4gaBoards",
   "schema_version": 1,
-  "source_commit_sha": "57a3e9be40f20b102716467b387588a586b606d7"
+  "source_commit_sha": "7c104b13994a2da855ac5027d037b7cc7aac8d4f"
 }

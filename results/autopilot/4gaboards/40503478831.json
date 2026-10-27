@@ -1,0 +1,32 @@
+{
+  "candidate_id": "candidate.awesome-selfhosted.7c0a6de620292451ed57",
+  "dimensions": {
+    "backup_restore": {
+      "status": "passed",
+      "summary": "isolated PostgreSQL and attachment-volume sentinels were backed up, mutated, restored, and matched original values"
+    },
+    "install_start": {
+      "status": "passed",
+      "summary": "official Compose deployment started and HTTP responded 200"
+    },
+    "persistence": {
+      "status": "passed",
+      "summary": "PostgreSQL sentinel survived full Compose down/up using declared named volumes"
+    },
+    "security": {
+      "status": "passed",
+      "summary": "compose baseline passed; services=3; no privileged/host-network/host-pid/dangerous-cap/docker-socket settings detected"
+    },
+    "upgrade": {
+      "status": "unknown",
+      "summary": "version-to-version upgrade profile not yet proven"
+    }
+  },
+  "github_run_id": "40503478831",
+  "github_run_url": "https://github.com/franzgeorgecode/dokpi-verifier/actions/runs/40503478831",
+  "observed_at": "2026-10-27T12:24:27Z",
+  "profile": "4gaboards-compose-v1",
+  "repository_url": "https://github.com/RARgames/4gaBoards",
+  "schema_version": 1,
+  "source_commit_sha": "e07e75a061cb4e18e4f4a3f008d767ea3000402b"
+}
